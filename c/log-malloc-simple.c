@@ -58,13 +58,14 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <execinfo.h>
+//#include "backtrace.h"
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
 #include <malloc.h>
-
+#include "log-malloc-simple.h"
 #include <dlfcn.h>
 #include <assert.h>
 
@@ -73,6 +74,8 @@
 #define LOG_BUFSIZE		4096
 /** FD where output is written to. */
 #define LOG_MALLOC_TRACE_FD		1022
+FILE* _log_malloc_fd = NULL;
+//struct backtrace_state* _backtrace_state = NULL;
 /** Maximum number of stack trace elements. */
 #define LOG_MALLOC_BACKTRACE_COUNT	20
 
@@ -82,6 +85,9 @@
 #define LOG_MALLOC_INIT_DONE		0x123FAB
 #define LOG_MALLOC_FINI_DONE		0xFAFBFC
 
+
+static int64_t alloc_size = 0;
+bool   enable_tracing=false;
 /* handler declarations */
 static void *(*real_malloc)(size_t size)	= NULL;
 static void  (*real_free)(void *ptr)		= NULL;
@@ -202,6 +208,8 @@ static inline void log_mem(const char * method, void *ptr, size_t size, struct b
 			}
 			len+=snprintf(buf+len, sizeof(buf)-len, "-\n");
 			write_log(buf, len);
+            //show_backtrace();
+            //backtrace_print(_backtrace_state, 0, stderr);
         }
 	return;
 }
@@ -224,6 +232,8 @@ static void *__init_lib(void)
         {
             write(STDERR_FILENO,"1022OPEN\n",9);
             memlog_disabled = false;
+            //_backtrace_state = backtrace_create_state(NULL, 1, NULL, NULL);
+            _log_malloc_fd = fdopen(LOG_MALLOC_TRACE_FD, "w");
         }
 	/* get real functions pointers */
 	DL_RESOLVE(malloc);
@@ -322,6 +332,7 @@ static __thread int in_trace = 0;
  *  INTERNAL FUNCTIONS
  */
 #define CREATE_BACKTRACE(BACKTRACE_STRUCT) (BACKTRACE_STRUCT).nptrs=backtrace(((BACKTRACE_STRUCT).buffer), LOG_MALLOC_BACKTRACE_COUNT)
+//#define CREATE_BACKTRACE(v) (void)(v)
 
 static inline void * calloc_static(size_t nmemb, size_t size)
 {
@@ -348,7 +359,7 @@ void *malloc(size_t size)
 		return calloc_static(size, 1);
 	}
 	void * ret=real_malloc(size);
-	if(!in_trace)
+	if(!in_trace && enable_tracing)
 	{
 		in_trace=1;
 		struct backtrace_struct bt;
@@ -357,6 +368,8 @@ void *malloc(size_t size)
 		log_mem("malloc", ret, sizeAllocated, &bt);
 		in_trace=0;
 	}
+    if (ret != NULL)
+        alloc_size += malloc_usable_size(ret);
 	return ret;
 }
 void *calloc(size_t nmemb, size_t size)
@@ -366,7 +379,7 @@ void *calloc(size_t nmemb, size_t size)
 		return calloc_static(nmemb, size);
 	}
 	void * ret=real_calloc(nmemb, size);
-	if(!in_trace)
+	if(!in_trace && enable_tracing)
 	{
 		in_trace=1;
 		struct backtrace_struct bt;
@@ -375,6 +388,9 @@ void *calloc(size_t nmemb, size_t size)
 		log_mem("calloc", ret, sizeAllocated, &bt);
 		in_trace=0;
 	}
+
+    if (ret != NULL)
+        alloc_size += malloc_usable_size(ret);
 	return ret;
 }
 
@@ -384,7 +400,7 @@ void *realloc(void *ptr, size_t size)
 		return NULL;
 	size_t prevSize=malloc_usable_size(ptr);
 	void * ret=real_realloc(ptr, size);
-	if(!in_trace)
+	if(!in_trace && enable_tracing)
 	{
 		in_trace=1;
 		struct backtrace_struct bt;
@@ -397,6 +413,9 @@ void *realloc(void *ptr, size_t size)
 		log_mem("realloc_alloc", ret, afterSize, &bt);
 		in_trace=0;
 	}
+
+    if (ret != NULL)
+        alloc_size += malloc_usable_size(ret);
 	return ret;
 }
 
@@ -405,7 +424,7 @@ void *memalign(size_t alignment, size_t size)
 	if(!DL_RESOLVE_CHECK(memalign))
 		return NULL;
 	void * ret=real_memalign(alignment, size);
-	if(!in_trace)
+	if(!in_trace && enable_tracing)
 	{
 		in_trace=1;
 		struct backtrace_struct bt;
@@ -422,7 +441,7 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
 	if(!DL_RESOLVE_CHECK(posix_memalign))
 		return ENOMEM;
 	int ret=real_posix_memalign(memptr, alignment, size);
-	if(!in_trace)
+	if(!in_trace && enable_tracing)
 	{
 		in_trace=1;
 		struct backtrace_struct bt;
@@ -439,7 +458,7 @@ void *valloc(size_t size)
 	if(!DL_RESOLVE_CHECK(valloc))
 		return NULL;
 	void * ret=real_valloc(size);
-	if(!in_trace)
+	if(!in_trace && enable_tracing)
 	{
 		in_trace=1;
 		struct backtrace_struct bt;
@@ -448,6 +467,8 @@ void *valloc(size_t size)
 		log_mem("valloc", ret, sizeAllocated, &bt);
 		in_trace=0;
 	}
+    if (ret != NULL)
+        alloc_size += malloc_usable_size(ret);
 	return ret;
 }
 void *pvalloc(size_t size)
@@ -455,7 +476,7 @@ void *pvalloc(size_t size)
 	if(!DL_RESOLVE_CHECK(pvalloc))
 		return NULL;
 	void * ret=real_pvalloc(size);
-	if(!in_trace)
+	if(!in_trace && enable_tracing)
 	{
 		in_trace=1;
 		struct backtrace_struct bt;
@@ -464,6 +485,8 @@ void *pvalloc(size_t size)
 		log_mem("pvalloc", ret, sizeAllocated, &bt);
 		in_trace=0;
 	}
+    if (ret != NULL)
+        alloc_size += malloc_usable_size(ret);
 	return ret;
 }
 
@@ -472,7 +495,7 @@ void *aligned_alloc(size_t alignment, size_t size)
 	if(!DL_RESOLVE_CHECK(aligned_alloc))
 		return NULL;
 	void * ret=real_aligned_alloc(alignment, size);
-	if(!in_trace)
+	if(!in_trace && enable_tracing)
 	{
 		in_trace=1;
 		struct backtrace_struct bt;
@@ -480,7 +503,10 @@ void *aligned_alloc(size_t alignment, size_t size)
 		size_t sizeAllocated=malloc_usable_size(ret);
 		log_mem("aligned_alloc", ret, sizeAllocated, &bt);
 		in_trace=0;
+
 	}
+    if (ret != NULL)
+        alloc_size += malloc_usable_size(ret);
 	return ret;
 }
 
@@ -491,7 +517,7 @@ void free(void *ptr)
 		// We can not log anything here because the log message would result another free call and it would fall into an endless loop
 		return;
 	}
-	if(ptr!=NULL&&!in_trace)
+	if(ptr!=NULL&&!in_trace && enable_tracing)
 	{
 		in_trace=1;
 		struct backtrace_struct bt;
@@ -499,8 +525,21 @@ void free(void *ptr)
 		size_t size=malloc_usable_size(ptr);
 		log_mem("free", ptr, size, &bt);
 		in_trace=0;
+
 	}
+    if (ptr != NULL)
+        alloc_size -= malloc_usable_size(ptr);
 	real_free(ptr);
+}
+
+
+int64_t log_malloc_simple_get_allocated_size() {
+    return alloc_size;
+}
+
+
+void log_malloc_simple_log_enable() {
+    enable_tracing = true;
 }
 
 /* EOF */
